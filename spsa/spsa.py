@@ -5,6 +5,8 @@ import numpy as np
 from random import random, randrange
 from random import sample
 
+__version__ = "0.1.3"
+print(f"Version: {__version__}")
 
 class Parameters:
     d: int  # number of dimensions
@@ -53,8 +55,6 @@ class SPSA:
         self.__dict__.update(**kwargs)
         self.Delta_abs_value = 1 / np.sqrt(self.d)
 
-        self.init_plot()
-
     def init_plot(self):
         self.fig = plt.figure()
         self.ax = self.fig.add_subplot()
@@ -90,9 +90,10 @@ class SPSA:
         print(f"Previous condition number: {cond_start}\n New condition number: {cond}")
         return cond, weight
 
-    def run(self, method):
+    def run(self, method, num_steps=20, eps=0.001):
         self.method = method
         cond, weight = self.update_matrix(method)
+        self.init_plot()
 
         errors = {}
         theta_hat = {
@@ -103,7 +104,7 @@ class SPSA:
                 } for target in self.M
         }
 
-        for k in range(1, 30):  # шаги
+        for k in range(1, num_steps):  # шаги
             theta_new = {}
             err = 0
 
@@ -112,7 +113,7 @@ class SPSA:
 
                 neibors = self.get_random_neibors(weight, 2)
 
-                colors = ["blue", "red", "green", "orange", "yellow"]
+                colors = ["blue", "red", "green", "orange", "yellow", "purple", "black", "gray"]
                 for ind, i in enumerate(self.N):
 
                     if k == 0:
@@ -123,8 +124,8 @@ class SPSA:
                     coef2 = 1 if random() < 0.5 else -1
                     delta = np.array([coef1 * self.Delta_abs_value, coef2 * self.Delta_abs_value])
 
-                    x1 = theta_hat[l][i] + self.beta_1 * delta * 5
-                    x2 = theta_hat[l][i] - self.beta_2 * delta * 5
+                    x1 = theta_hat[l][i] + self.beta_1 * delta
+                    x2 = theta_hat[l][i] - self.beta_2 * delta
 
                     y1 = self.f_l_i(l, i, x1, neibors)
                     y2 = self.f_l_i(l, i, x2, neibors)
@@ -137,21 +138,20 @@ class SPSA:
                     theta_diff = [abs(b[j - 1]) * (theta_hat[l][i] - theta_hat[l][j]) for j in neibors_i]
 
                     theta_new[l][i] = theta_hat[l][i] - (self.alpha * spsa + self.gamma * sum(theta_diff))
+                    if i == 8:
+                        self.ax.plot([theta_hat[l][i][0], theta_new[l][i][0]], [theta_hat[l][i][1], theta_new[l][i][1]], markersize=2, color=colors[ind])
                     self.ax.plot(theta_new[l][i][0], theta_new[l][i][1], 'o', markersize=3, color=colors[ind])
 
                     err += self.compute_error(theta_new[l][i], self.r[l])
 
                 self.fig.canvas.draw()
                 print(f"Error - {err:.2f} on {k} step")
-                time.sleep(2)
-
-                # for i in range(len(to_remove)):
-                #     to_remove.pop().pop(0).remove()
+                time.sleep(1)
 
             theta_hat = theta_new.copy()
             errors[k] = err
 
-            if err < 0.01:
+            if err < eps or err > 1e+9:
                 break
         self.errors = errors
 
@@ -173,9 +173,9 @@ class SPSA:
         C = self.C_i(i, neibors)
         D = self.D_l_i(l, i, neibors)
 
-        if C.shape[0] == C.shape[1]:
+        try:
             C_i_inv = np.linalg.inv(C)
-        else:
+        except Exception:
             C_i_inv = np.linalg.pinv(C)
 
         diff = r_hat_l - np.matmul(C_i_inv, D)
