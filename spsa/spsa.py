@@ -4,34 +4,29 @@ import numpy as np
 from random import random
 from random import sample
 from copy import deepcopy
+import pandas as pd
 
 __version__ = "0.1.4"
 print(f"Version: {__version__}")
 
 
 class Parameters:
-    d: int  # number of dimensions
-
     n: int  # number of sensors
     N: list  # indexes of sensors
     s: dict  # sensors coordinates
-    s_norms: dict
 
     m: int  # nuber of targets
     M: list  # targets indexes
     r: dict  # targets coordinates
-    theta: list  # searching for    !!!! maybe not needed
-
-    meas: dict  # measurments of distance between target and sensor
-
-    init_coord: list  # r estimations    !!!! maybe not needed
 
     beta_1: float
     beta_2: float
-    beta: float
     alpha: float
     gamma: float
     weight: list
+
+    moment_alpha: float
+    track_coef: float
 
 
 def rho(point_1, point_2):
@@ -56,7 +51,11 @@ class SPSA:
 
     def __init__(self, **kwargs):
         self.__dict__.update(**kwargs)
+
+        self.s_norms = {i: sum(val * val) for i, val in self.s.items()}
         self.Delta_abs_value = 1 / np.sqrt(self.d)
+        self.beta = self.beta_1 + self.beta_2
+        self.meas = {targ: {sens: rho(self.r.get(targ), self.s.get(sens)) for sens in self.N} for targ in self.M}
 
     def init_plot(self):
         self.fig = plt.figure()
@@ -67,136 +66,169 @@ class SPSA:
         self.fig.canvas.draw()
 
         # draw targets
-        x = [i for i, j in self.r.values()]
-        y = [j for i, j in self.r.values()]
+        x = [i for i, j in self.target_path[1].values()]
+        y = [j for i, j in self.target_path[1].values()]
         self.ax.plot(x, y, 'bx', markersize=8)
 
         x = [i for i, j in self.s.values()]
         y = [j for i, j in self.s.values()]
         self.ax.plot(x, y, 'gx', markersize=3)
 
-    def update_matrix(self, method):
-        cond_start = cond_num(self.weight)
-        if method == "cheb":
-            weight = self.cheb_acceleration(self.weight)
+    def init_random_vars(self, num_steps, friends_num, tracking):
+        # set up random variables
+        self.neibors = {k: self.get_random_neibors(self.weight, max=friends_num) for k in range(1, num_steps + 1)}
+        self.random_coef = {
+            k: {
+                sensor: [random(), random()] for sensor in self.N
+            } for k in range(1, num_steps + 1)
+        }  # todo: for multiple targets
 
-        elif method == "inv":
-            dig = np.diag(np.diag(self.weight))
-            inv = np.linalg.inv(dig)
-            weight = np.matmul(self.weight, inv)
+        self.target_path = {1: deepcopy(self.r)}
 
-        elif method == "main":
-            weight = self.weight
+        if not tracking:
+            return
 
-        cond = cond_num(weight)
-        print(f"Previous condition number: {cond_start}\n New condition number: {cond}")
-        return cond, weight
+        coef = self.track_coef
+        for k in range(2, num_steps + 1):
+            self.target_path[k] = {l:
+                                       self.target_path[k - 1][l] + [2 * coef * random() - coef,
+                                                                     2 * coef * random() - coef]
+                                   for l in self.M
+                                   }
 
-    def run(self, method, num_steps=20, eps=0.01, friends_num=2):
+    def run(self, method, num_steps=20, eps=0.01, friends_num=2, accelerate=False, tracking=False, check=False):
         self.method = method
-        cond, weight = self.update_matrix(method)
+        print(self.moment_alpha)
+
+        if not hasattr(self, "neibors"):
+            print("Init random variables")
+            self.init_random_vars(num_steps, friends_num, tracking)
+
         self.init_plot()
 
+        self.update_target_position(self.target_path[1], tracking)
         theta_hat = {
-            target:
-                {
+            target: {
                     sensor: self.s.get(sensor) + np.array([np.sqrt(self.meas.get(target).get(sensor) / 2),
                                                            np.sqrt(self.meas.get(target).get(sensor) / 2)])
                     for sensor in self.N
-                } for target in self.M
+            } for target in self.M
         }
-        history = {1: {0: {"points": deepcopy(theta_hat)}}}  # for the first target on zero step
-        err_history = {l: {} for l in self.M}
+        err_history = {target: {} for target in self.M}
         errors = {target: {} for target in self.M}
+        momentum = {}
+        history_val = pd.DataFrame()
 
-        for k in range(1, num_steps):  # шаги
+        for step in range(1, num_steps + 1):  # шаги
             theta_new = {}
 
-            for l in self.M:
-                theta_new[l] = {}  # Estimator of target position
-                err_history[l][k] = {}  # Error history for each step k for each target l
-                step_val = {}
+            for target in self.M:
+                theta_new[target] = {}  # Estimator of target position
+                err_history[target][step] = {}  # Error history for each step step for each target target
 
-                neibors = self.get_random_neibors(weight, max=friends_num)
-
-                for ind, i in enumerate(self.N):
-                    if k == 0:
-                        self.ax.plot(theta_hat[l][i][0], theta_hat[l][i][1], 'o', markersize=3,
+                for ind, sensor in enumerate(self.N):
+                    if step == 0:
+                        self.ax.plot(theta_hat[target][sensor][0], theta_hat[target][sensor][1], 'o', markersize=3,
                                      color=self.colors[ind])
 
-                    coef1 = 1 if random() < 0.5 else -1
-                    coef2 = 1 if random() < 0.5 else -1
-                    delta = np.array([coef1 * self.Delta_abs_value, coef2 * self.Delta_abs_value])
+                    spsa = self.spsa_step(sensor, step, target, theta_hat)
+                    theta_diff = self.local_vote_step(sensor, step, target, theta_hat[target][sensor], theta_hat)
 
-                    # spsa step
-                    x1 = theta_hat[l][i] + self.beta_1 * delta
-                    x2 = theta_hat[l][i] - self.beta_2 * delta
+                    # momentum method
+                    main_coef = self.moment_alpha
+                    mom_step = self.gamma * theta_diff
 
-                    y1 = self.f_l_i(l, i, x1, neibors)
-                    y2 = self.f_l_i(l, i, x2, neibors)
+                    if accelerate:
+                        mom_step = main_coef * momentum.get(sensor, np.array([0, 0])) + mom_step
+                        momentum[sensor] = mom_step
 
-                    spsa = (y1 - y2) / (2 * self.beta) * delta
+                    theta_new[target][sensor] = theta_hat[target][sensor] - (self.alpha * spsa + mom_step)
 
-                    # local voting step
-                    neibors_i = neibors.get(i, [])
-                    b = weight[i - 1]
-                    theta_diff = sum([abs(b[j - 1]) * (theta_hat[l][i] - theta_hat[l][j]) for j in neibors_i])
+                    self.update_plot_step(ind, sensor, target, theta_hat, theta_new)
 
-                    theta_new[l][i] = theta_hat[l][i] - (self.alpha * spsa + self.gamma * theta_diff)
-
-                    # update plot
-                    if i == 3:
-                        self.ax.plot([theta_hat[l][i][0], theta_new[l][i][0]], [theta_hat[l][i][1], theta_new[l][i][1]],
-                                     markersize=2, color=self.colors[ind])
-                    self.ax.plot(theta_new[l][i][0], theta_new[l][i][1], 'o', markersize=3, color=self.colors[ind])
-
-                    err_l_i = self.compute_error(theta_new[l][i], self.r[l])
-                    step_val[i] = {
-                        "old": theta_hat[l][i],
+                    err_l_i = self.compute_error(theta_new[target][sensor], self.r[target])
+                    history_val = history_val.append({
+                        "sensor": sensor,
+                        "target": target,
+                        "step": step,
+                        "neibors": self.neibors[step][sensor],
+                        "old": theta_hat[target][sensor],
                         "spsa": self.alpha * spsa,
                         "theta_diff": theta_diff,
                         "theta_diff_sum": self.gamma * theta_diff,
+                        "theta_moment": mom_step,
                         "sum": self.alpha * spsa + self.gamma * theta_diff,
-                        "new": theta_new[l][i],
-                        "x": [x1, x2, y1, y2],
+                        "new": theta_new[target][sensor],
                         "err": err_l_i
-                    }
-                    err_history[l][k][i] = err_l_i
+                    })
+                    err_history[target][step][sensor] = err_l_i
 
                 self.fig.canvas.draw()
-                print(f"Error - {sum(err_history[l][k].values()):.2f} on {k} step for {l} target")
+                print(
+                    f"Error - {sum(err_history[target][step].values()) / self.n:.2f} on {step} step for {target} target")
                 time.sleep(1)
-                errors[l][k] = sum(err_history[l][k].values()) / self.n
+                errors[target][step] = sum(err_history[target][step].values()) / self.n
 
-                history[l][k] = {
-                    "neibors": neibors,
-                    "spsa": step_val
-                }
-
-                if errors[l][k] < eps or errors[l][k] > 1e+9:  # todo: for multiple targets
-                    break
+            if errors[1][step] < eps or errors[1][step] > 1e+9:  # todo: for multiple targets
+                break
 
             theta_hat = deepcopy(theta_new)
 
+            if tracking:
+                self.update_target_position(self.target_path[step], tracking)
+
         self.errors = errors
-        self.history = history
         self.err_history = err_history
 
         # Compute error for each target and sensor separately
-        target_err = {}
-        for target in self.M:
-            target_err[target] = {sensor: self.compute_error(theta_hat[target][sensor], self.r[target]) for sensor in
-                                  self.N}
+        target_err = {
+            target: {
+                sensor: self.compute_error(theta_hat[target][sensor], self.r[target]) for sensor in self.N
+            } for target in self.M
+        }
 
         return Result(
+            check=check,
+            tracking=tracking,
+            accelerate=accelerate,
             method=method,
-            weight=weight,
             errors=errors,
-            cond=cond,
             theta_hat=theta_hat,
+            moment_alpha=self.moment_alpha,
             target_err=target_err,
-            history=history,
+            history=history_val,
             err_history=err_history)
+
+    def update_plot_step(self, ind, sensor, target, theta_hat, theta_new):
+        if sensor == 3:
+            self.ax.plot([theta_hat[target][sensor][0], theta_new[target][sensor][0]],
+                         [theta_hat[target][sensor][1], theta_new[target][sensor][1]],
+                         markersize=2, color=self.colors[ind])
+        self.ax.plot(theta_new[target][sensor][0], theta_new[target][sensor][1], 'o', markersize=3,
+                     color=self.colors[ind])
+
+    def local_vote_step(self, sensor, step, target, theta_sensor, theta_hat):
+        neibors_i = self.neibors[step].get(sensor, [])
+        b = self.weight[sensor - 1]
+
+        theta_diff = sum([abs(b[j - 1]) * (theta_sensor - theta_hat[target][j]) for j in neibors_i])
+        return theta_diff
+
+    def spsa_step(self, sensor, step, target, theta_hat):
+        coef1 = 1 if self.random_coef[step][sensor][0] < 0.5 else -1
+        coef2 = 1 if self.random_coef[step][sensor][1] < 0.5 else -1
+
+        delta = np.array([coef1 * self.Delta_abs_value, coef2 * self.Delta_abs_value])
+
+        # spsa step
+        x1 = theta_hat[target][sensor] + self.beta_1 * delta
+        x2 = theta_hat[target][sensor] - self.beta_2 * delta
+
+        y1 = self.f_l_i(target, sensor, x1, self.neibors[step])
+        y2 = self.f_l_i(target, sensor, x2, self.neibors[step])
+
+        spsa = (y1 - y2) / (2 * self.beta) * delta
+        return spsa
 
     def f_l_i(self, l, i, r_hat_l, neibors):
         """ Calculate function f for target l and for sensor i
@@ -255,6 +287,19 @@ class SPSA:
         shift = rad * np.array([np.sin(phi), np.cos(phi)])
         return coords + shift
 
+    def update_target_position(self, new_positions, tracking):
+        if tracking:
+            self.ax.plot([self.r[1][0], new_positions[1][0]],
+                         [self.r[1][1], new_positions[1][1]], 'bx', markersize=8)
+        self.r = new_positions
+        self.meas = {
+            target:
+                {
+                    sensor: rho(self.r.get(target), self.s.get(sensor)) for sensor in self.N
+                    # measurments  from target to sensor
+                } for target in self.M
+        }
+
     def compute_error(self, vector_1, vector_2):
         return pow(sum(vector_1 - vector_2), 2)
 
@@ -306,46 +351,36 @@ class SPSA:
 if __name__ == "__main__":
     par = Parameters()
 
-    par.n = 8  # number of sensors
+    par.n = 5  # number of sensors
     par.N = {i for i in range(1, par.n + 1)}  # indexes of sensors
     par.s = {1: np.array([1, 2]),  # sensors coordinates
              2: np.array([3, 20]),
              3: np.array([10, 3]),
              4: np.array([20, 3]),
-             5: np.array([3, 10]),
-             6: np.array([3, 25]),
-             7: np.array([3, 15]),
-             8: np.array([3, 5]),
-             }
-    par.s_norms = {i: sum(val * val) for i, val in par.s.items()}
+             5: np.array([3, 10])}
 
     par.m = 1  # nuber of targets
     par.M = {i for i in range(1, par.m + 1)}  # targets indexes
-    par.r = {1: np.array([40, 40])}  # targets coordinates
-    par.theta = np.array([val for key, val in par.r.items()])  # searching for
-
-    par.meas = {1: {sens: rho(par.r.get(1), par.s.get(sens)) for sens in par.N}}
-
-    par.init_coord = np.array([5, 5])  # r estimations
+    par.r = {1: np.array([40, 10])}  # targets coordinates
 
     par.d = 2  # number of dimensions
 
     par.beta_1 = 0.5
     par.beta_2 = 0.5
-    par.beta = par.beta_1 + par.beta_2
 
     par.alpha = 1 / 4
     par.gamma = 1 / 4
 
+    par.weight = np.array([[3., -1., -1., -1., 0.],
+                           [-1., 3., 0., -1., -1.],
+                           [-1., 0., 2., 0., -1.],
+                           [-1., -1., 0., 3., -1.],
+                           [0., -1., -1., -1., 3.]])
+
+    par.nest_alpha = 1 / 4
+
     par.b = 1
-    par.weight = np.array([[7, 0.14, 0.14, 0.14, 0.14, 0.14, 0.14, 0.14],
-                           [0.14, 7, 0.14, 0.14, 0.14, 0.14, 0.14, 0.14],
-                           [0.14, 0.14, 7, 0.14, 0.14, 0.14, 0.14, 0.14],
-                           [0.14, 0.14, 0.14, 7, 0.14, 0.14, 0.14, 0.14],
-                           [0.14, 0.14, 0.14, 0.14, 7, 0.14, 0.14, 0.14],
-                           [0.14, 0.14, 0.14, 0.14, 0.14, 7, 0.14, 0.14],
-                           [0.14, 0.14, 0.14, 0.14, 0.14, 0.14, 7, 0.14],
-                           [0.14, 0.14, 0.14, 0.14, 0.14, 0.14, 0.14, 7], ])
+    par.moment_alpha = 0.6
 
 
     def K(u):
@@ -355,5 +390,7 @@ if __name__ == "__main__":
 
 
     spsa = SPSA(**par.__dict__)
-    res = spsa.run("main", ada=True)
-    print(res)
+    print("\n\nMain method\n")
+    spsa_res = spsa.run("main", accelerate=True, tracking=True)
+
+    print(spsa_res)
