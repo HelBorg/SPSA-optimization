@@ -5,8 +5,9 @@ from random import random
 from random import sample
 from copy import deepcopy
 import pandas as pd
+import json
 
-__version__ = "0.1.4"
+__version__ = "0.1.6"
 print(f"Version: {__version__}")
 
 
@@ -30,10 +31,20 @@ class Parameters:
 
 
 class Agent:
-    targets: dict
+    ind: int
+    position: list
+
+    def __init__(self, targets):
+        self.targets = {target: TargetInfo() for target in targets}
+
 
 class TargetInfo:
-    theta_hat
+    position: np.array
+    meas: np.array
+    # theta_hat: np.array
+    # theta_new: np.array
+    nest_mem: float = 0
+    error: np.array
 
 
 def rho(point_1, point_2):
@@ -46,6 +57,7 @@ def cond_num(matrix):
     eig = np.linalg.eig(matrix)[0]
     eig = sorted([abs(n) for n in eig if abs(n) > 0.00001])
     return eig[-1] / eig[0]
+
 
 class Result:
     def __init__(self, **kwargs):
@@ -114,13 +126,30 @@ class SPSA:
 
         self.update_target_position(self.target_path[1], tracking)
         theta_hat = {
-            target: {
-                sensor: self.s.get(sensor) + np.array([np.sqrt(self.meas.get(target).get(sensor) / 2),
+            sensor: {
+                target: self.s.get(sensor) + np.array([np.sqrt(self.meas.get(target).get(sensor) / 2),
                                                        np.sqrt(self.meas.get(target).get(sensor) / 2)])
-                for sensor in self.N
-            } for target in self.M
+                for target in self.M
+            } for sensor in self.N
         }
-        err_history = {target: {} for target in self.M}
+
+        agents = {}
+        for sensor in self.N:
+            agent = Agent(self.M)
+            agent.ind = sensor
+            agent.position = self.s[sensor]
+            targets = {}
+            for target in self.M:
+                info = TargetInfo()
+                info.tar_ind = target
+                info.position = self.r[target]
+                info.meas = rho(info.position, agent.position)
+                # info.theta_hat = agent.position + np.array([np.sqrt(info.meas) / 2, np.sqrt(info.meas) / 2])
+                targets[target] = info
+            agent.targets = targets
+            agents[sensor] = agent
+
+        err_history = {sensor: {} for sensor in self.N}
         errors = {target: {} for target in self.M}
         history_val = pd.DataFrame()
 
@@ -145,72 +174,74 @@ class SPSA:
                 print("diff < 0")
             alpha_nest = alpha_x + diff
 
-            for target in self.M:
-                theta_new[target] = {}  # Estimator of target position
-                err_history[target][step] = {}  # Error history for each step step for each target target
 
-                for ind, sensor in enumerate(self.N):
+            for agent in agents.values():
+                theta_new[agent.ind] = {}  # Estimator of target position
+                err_history[agent.ind][step] = {}  # Error history for each step step for each target target
+
+                for target in agent.targets.values():
+
                     if step == 0:
-                        self.ax.plot(theta_hat[target][sensor][0], theta_hat[target][sensor][1], 'o', markersize=3,
-                                     color=self.colors[ind])
-
-                    spsa = self.spsa_step(sensor, step, target, theta_hat)
+                        self.ax.plot(theta_hat[agent.ind][target.tar_ind][0], theta_hat[agent.ind][target.tar_ind][1], 'o', markersize=3,
+                                     color=self.colors[agent.ind])
+                    spsa = self.spsa_step(agent.ind, step, target.tar_ind, theta_hat)
 
                     # nesterov acceleraion
                     # firstly go in the direction of previous theta_diff then find new one
                     # theta_diff_sum can be changed to sum so we will acc spsa step to
                     if step > 1 and accelerate:
-                        prev_step_info = history_val.loc[
-                            (history_val["target"] == target)
-                            & (history_val["step"] == step - 1)
-                            & (history_val["sensor"] == sensor)]
-
-                        v_n = prev_step_info["v_n"].iloc[0]
+                        v_n = target.nest_mem
                         x_n = 1 / (gamma_nest + alpha_nest * (mu - eta)) * (alpha_nest * gamma_nest * v_n
-                                                                            + gamma_nest_next * theta_hat[target][
-                                                                                sensor])
+                                                                            + gamma_nest_next * theta_hat[agent.ind][
+                                                                                target.tar_ind])
                         coef = h
                     else:
-                        x_n = theta_hat[target][sensor]
                         v_n = 0
+                        x_n = theta_hat[agent.ind][target.tar_ind]
                         coef = self.gamma
 
-                    theta_diff = self.local_vote_step(sensor, step, target, x_n, theta_hat)
+                    theta_diff = self.local_vote_step(agent.ind, step, target.tar_ind, x_n, theta_hat)
                     nesterov_step = coef * theta_diff
 
-                    theta_new[target][sensor] = x_n - (self.alpha * spsa + nesterov_step)
+                    theta_new[agent.ind][target.tar_ind] = x_n - (self.alpha * spsa + nesterov_step)
 
                     if step > 1 and accelerate:
                         v_n = 1 / gamma_nest * ((1 - alpha_nest) * gamma_nest * v_n + alpha_nest * (
-                                    mu - eta) * x_n - alpha_nest * nesterov_step)
+                                mu - eta) * x_n - alpha_nest * nesterov_step)
 
-                    self.update_plot_step(ind, sensor, target, theta_hat, theta_new)
+                    self.update_plot_step(agent.ind, target.tar_ind, theta_hat, theta_new)
 
-                    err_l_i = self.compute_error(theta_new[target][sensor], self.r[target])
-                    history_val = history_val.append({
-                        "sensor": sensor,
-                        "target": target,
-                        "step": step,
-                        "neibors": self.neibors[step][sensor],
-                        "old": theta_hat[target][sensor],
-                        "spsa": self.alpha * spsa,
-                        "theta_diff": theta_diff,
-                        "theta_diff_sum": self.gamma * theta_diff,
-                        "sum": self.alpha * spsa + self.gamma * theta_diff,
-                        "new": theta_new[target][sensor],
-                        "err": err_l_i,
-                        "nesterov_step": nesterov_step,
-                        "v_n": v_n,
-                        "alpah_nest": alpha_nest,
-                        "gamma_nest": gamma_nest
-                    }, ignore_index=True)
-                    err_history[target][step][sensor] = err_l_i
+                    err_l_i = self.compute_error(theta_new[agent.ind][target.tar_ind], self.r[target.tar_ind])
+                    # history_val = history_val.append({
+                    #     "agent": agent,
+                    #     "target": target,
+                    #     "step": step,
+                    #     "neibors": self.neibors[step][agent.ind],
+                    #     "old": theta_hat[agent.ind][target.tar_ind],
+                    #     "spsa": self.alpha * spsa,
+                    #     "theta_diff": theta_diff,
+                    #     "theta_diff_sum": self.gamma * theta_diff,
+                    #     "sum": self.alpha * spsa + self.gamma * theta_diff,
+                    #     "new": theta_new[agent.ind][target.tar_ind],
+                    #     "err": err_l_i,
+                    #     "nesterov_step": nesterov_step,
+                    #     "v_n": v_n,
+                    #     "alpah_nest": alpha_nest,
+                    #     "gamma_nest": gamma_nest
+                    # }, ignore_index=True)
+
+                    target.error = err_l_i
+                    target.nest_mem = v_n
+
+                    err_history[agent.ind][step][target.tar_ind] = err_l_i
 
                 self.fig.canvas.draw()
-                print(
-                    f"Error - {sum(err_history[target][step].values()) / self.n:.2f} on {step} step for {target} target")
-                time.sleep(1)
-                errors[target][step] = sum(err_history[target][step].values()) / self.n
+
+            print(
+                f"Error - {sum([err_history[sensor][step][1] for sensor in self.N]) / self.n:.2f} on {step} step for {1} target")
+            time.sleep(1)
+
+            errors[1][step] = sum([err_history[sensor][step][1] for sensor in self.N]) / self.n
 
             if errors[1][step] < eps or errors[1][step] > 1e+9:  # todo: for multiple targets
                 break
@@ -226,7 +257,7 @@ class SPSA:
         # Compute error for each target and sensor separately
         target_err = {
             target: {
-                sensor: self.compute_error(theta_hat[target][sensor], self.r[target]) for sensor in self.N
+                sensor: self.compute_error(theta_hat[sensor][target], self.r[target]) for sensor in self.N
             } for target in self.M
         }
 
@@ -240,21 +271,22 @@ class SPSA:
             moment_alpha=self.moment_alpha,
             target_err=target_err,
             history=history_val,
-            err_history=err_history)
+            err_history=err_history,
+            agents=agents)
 
-    def update_plot_step(self, ind, sensor, target, theta_hat, theta_new):
+    def update_plot_step(self, sensor, target, theta_hat, theta_new):
         if sensor == 3:
-            self.ax.plot([theta_hat[target][sensor][0], theta_new[target][sensor][0]],
-                         [theta_hat[target][sensor][1], theta_new[target][sensor][1]],
-                         markersize=2, color=self.colors[ind])
-        self.ax.plot(theta_new[target][sensor][0], theta_new[target][sensor][1], 'o', markersize=3,
-                     color=self.colors[ind])
+            self.ax.plot([theta_hat[sensor][target][0], theta_new[sensor][target][0]],
+                         [theta_hat[sensor][target][1], theta_new[sensor][target][1]],
+                         markersize=2, color=self.colors[sensor - 1])
+        self.ax.plot(theta_new[sensor][target][0], theta_new[sensor][target][1], 'o', markersize=3,
+                     color=self.colors[sensor - 1])
 
     def local_vote_step(self, sensor, step, target, theta_sensor, theta_hat):
         neibors_i = self.neibors[step].get(sensor, [])
         b = self.weight[sensor - 1]
 
-        theta_diff = sum([abs(b[j - 1]) * (theta_sensor - theta_hat[target][j]) for j in neibors_i])
+        theta_diff = sum([abs(b[j - 1]) * (theta_sensor - theta_hat[j][target]) for j in neibors_i])
         return theta_diff
 
     def spsa_step(self, sensor, step, target, theta_hat):
@@ -264,8 +296,8 @@ class SPSA:
         delta = np.array([coef1 * self.Delta_abs_value, coef2 * self.Delta_abs_value])
 
         # spsa step
-        x1 = theta_hat[target][sensor] + self.beta_1 * delta
-        x2 = theta_hat[target][sensor] - self.beta_2 * delta
+        x1 = theta_hat[sensor][target] + self.beta_1 * delta
+        x2 = theta_hat[sensor][target] - self.beta_2 * delta
 
         y1 = self.f_l_i(target, sensor, x1, self.neibors[step])
         y2 = self.f_l_i(target, sensor, x2, self.neibors[step])
