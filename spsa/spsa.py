@@ -29,6 +29,13 @@ class Parameters:
     track_coef: float
 
 
+class Agent:
+    targets: dict
+
+class TargetInfo:
+    theta_hat
+
+
 def rho(point_1, point_2):
     """Calculate distance between point_1 and point_2"""
     diff = point_1 - point_2
@@ -39,7 +46,6 @@ def cond_num(matrix):
     eig = np.linalg.eig(matrix)[0]
     eig = sorted([abs(n) for n in eig if abs(n) > 0.00001])
     return eig[-1] / eig[0]
-
 
 class Result:
     def __init__(self, **kwargs):
@@ -109,18 +115,35 @@ class SPSA:
         self.update_target_position(self.target_path[1], tracking)
         theta_hat = {
             target: {
-                    sensor: self.s.get(sensor) + np.array([np.sqrt(self.meas.get(target).get(sensor) / 2),
-                                                           np.sqrt(self.meas.get(target).get(sensor) / 2)])
-                    for sensor in self.N
+                sensor: self.s.get(sensor) + np.array([np.sqrt(self.meas.get(target).get(sensor) / 2),
+                                                       np.sqrt(self.meas.get(target).get(sensor) / 2)])
+                for sensor in self.N
             } for target in self.M
         }
         err_history = {target: {} for target in self.M}
         errors = {target: {} for target in self.M}
-        momentum = {}
         history_val = pd.DataFrame()
+
+        # nesterov coef
+        L = 2
+        h = 0.08
+        H = h - pow(h, 2) * L / 2
+        gamma_nest_next = 0.1
+        mu = 2
+        eta = 0.95
+        alpha_nest = 0.5
+        alpha_x = 0.5
 
         for step in range(1, num_steps + 1):  # шаги
             theta_new = {}
+            gamma_nest = gamma_nest_next
+            gamma_nest_next = (1 - alpha_nest) * gamma_nest + alpha_nest * (mu - eta)
+            # diff = np.sqrt(H * 2 * gamma_nest) - alpha_x
+            diff = 0
+            if diff < 0:
+                diff = 0
+                print("diff < 0")
+            alpha_nest = alpha_x + diff
 
             for target in self.M:
                 theta_new[target] = {}  # Estimator of target position
@@ -132,17 +155,34 @@ class SPSA:
                                      color=self.colors[ind])
 
                     spsa = self.spsa_step(sensor, step, target, theta_hat)
-                    theta_diff = self.local_vote_step(sensor, step, target, theta_hat[target][sensor], theta_hat)
 
-                    # momentum method
-                    main_coef = self.moment_alpha
-                    mom_step = self.gamma * theta_diff
+                    # nesterov acceleraion
+                    # firstly go in the direction of previous theta_diff then find new one
+                    # theta_diff_sum can be changed to sum so we will acc spsa step to
+                    if step > 1 and accelerate:
+                        prev_step_info = history_val.loc[
+                            (history_val["target"] == target)
+                            & (history_val["step"] == step - 1)
+                            & (history_val["sensor"] == sensor)]
 
-                    if accelerate:
-                        mom_step = main_coef * momentum.get(sensor, np.array([0, 0])) + mom_step
-                        momentum[sensor] = mom_step
+                        v_n = prev_step_info["v_n"].iloc[0]
+                        x_n = 1 / (gamma_nest + alpha_nest * (mu - eta)) * (alpha_nest * gamma_nest * v_n
+                                                                            + gamma_nest_next * theta_hat[target][
+                                                                                sensor])
+                        coef = h
+                    else:
+                        x_n = theta_hat[target][sensor]
+                        v_n = 0
+                        coef = self.gamma
 
-                    theta_new[target][sensor] = theta_hat[target][sensor] - (self.alpha * spsa + mom_step)
+                    theta_diff = self.local_vote_step(sensor, step, target, x_n, theta_hat)
+                    nesterov_step = coef * theta_diff
+
+                    theta_new[target][sensor] = x_n - (self.alpha * spsa + nesterov_step)
+
+                    if step > 1 and accelerate:
+                        v_n = 1 / gamma_nest * ((1 - alpha_nest) * gamma_nest * v_n + alpha_nest * (
+                                    mu - eta) * x_n - alpha_nest * nesterov_step)
 
                     self.update_plot_step(ind, sensor, target, theta_hat, theta_new)
 
@@ -156,11 +196,14 @@ class SPSA:
                         "spsa": self.alpha * spsa,
                         "theta_diff": theta_diff,
                         "theta_diff_sum": self.gamma * theta_diff,
-                        "theta_moment": mom_step,
                         "sum": self.alpha * spsa + self.gamma * theta_diff,
                         "new": theta_new[target][sensor],
-                        "err": err_l_i
-                    })
+                        "err": err_l_i,
+                        "nesterov_step": nesterov_step,
+                        "v_n": v_n,
+                        "alpah_nest": alpha_nest,
+                        "gamma_nest": gamma_nest
+                    }, ignore_index=True)
                     err_history[target][step][sensor] = err_l_i
 
                 self.fig.canvas.draw()
