@@ -7,7 +7,7 @@ from copy import deepcopy
 import pandas as pd
 import json
 
-__version__ = "0.1.6"
+__version__ = "0.1.4"
 print(f"Version: {__version__}")
 
 
@@ -31,20 +31,54 @@ class Parameters:
 
 
 class Agent:
-    ind: int
+    id: int
     position: list
+    targets_info: dict
 
-    def __init__(self, targets):
-        self.targets = {target: TargetInfo() for target in targets}
+    def __init__(self, sensor_id, position, targets):
+        self.id = sensor_id
+        self.position = position
+        self.targets_info = {
+            target_id: TargetInfo(target, self.position) for target_id, target in targets.items()
+        }
+
+    def get_target_info(self, target_id):
+        return self.targets_info.get(target_id)
+
+    def update_target(self, tracking):
+        res = [tar.update(self.position, tracking) for tar in self.targets_info.values()]
+
+
+class Target:
+    id: int
+    position: np.array
+
+    def __init__(self, tar_id, position):
+        self.id = tar_id
+        self.position = position
+
+    def update_position(self, new_positions: dict):
+        self.position = new_positions.get(self.id)
 
 
 class TargetInfo:
-    position: np.array
+    target: Target
     meas: np.array
-    # theta_hat: np.array
-    # theta_new: np.array
+    theta_hat: np.array
+    theta_new: np.array
     nest_mem: float = 0
     error: np.array
+
+    def __init__(self, target, agent_pos):
+        self.target = target
+        self.meas = rho(self.target.position, agent_pos)
+        self.theta_hat = agent_pos + np.array([np.sqrt(self.meas / 2), np.sqrt(self.meas / 2)])
+
+    def update(self, agent_pos, tracking):
+        self.theta_hat = self.theta_new  # todo: maybe remove and use just theta_hat or parallel approach
+        if tracking:
+            self.meas = rho(self.target.position, agent_pos)
+        return 1
 
 
 def rho(point_1, point_2):
@@ -94,7 +128,7 @@ class SPSA:
 
     def init_random_vars(self, num_steps, friends_num, tracking):
         # set up random variables
-        self.neibors = {k: self.get_random_neibors(self.weight, max=friends_num) for k in range(1, num_steps + 1)}
+        self.neighbors = {k: self.get_random_neibors(self.weight, max=friends_num) for k in range(1, num_steps + 1)}
         self.random_coef = {
             k: {
                 sensor: [random(), random()] for sensor in self.N
@@ -118,40 +152,19 @@ class SPSA:
         self.method = method
         print(self.moment_alpha)
 
-        if not hasattr(self, "neibors"):
+        if not hasattr(self, "neighbors"):
             print("Init random variables")
             self.init_random_vars(num_steps, friends_num, tracking)
 
         self.init_plot()
 
-        self.update_target_position(self.target_path[1], tracking)
-        theta_hat = {
-            sensor: {
-                target: self.s.get(sensor) + np.array([np.sqrt(self.meas.get(target).get(sensor) / 2),
-                                                       np.sqrt(self.meas.get(target).get(sensor) / 2)])
-                for target in self.M
-            } for sensor in self.N
-        }
+        targets = {target_id: Target(target_id, self.target_path[1][target_id]) for target_id in self.M}
+        agents = {sensor_id: Agent(sensor_id, self.s[sensor_id], targets) for sensor_id in self.N}
+        self.update_target_position(self.target_path[1], tracking, agents)
 
-        agents = {}
-        for sensor in self.N:
-            agent = Agent(self.M)
-            agent.ind = sensor
-            agent.position = self.s[sensor]
-            targets = {}
-            for target in self.M:
-                info = TargetInfo()
-                info.tar_ind = target
-                info.position = self.r[target]
-                info.meas = rho(info.position, agent.position)
-                # info.theta_hat = agent.position + np.array([np.sqrt(info.meas) / 2, np.sqrt(info.meas) / 2])
-                targets[target] = info
-            agent.targets = targets
-            agents[sensor] = agent
-
+        history_val = pd.DataFrame()
         err_history = {sensor: {} for sensor in self.N}
         errors = {target: {} for target in self.M}
-        history_val = pd.DataFrame()
 
         # nesterov coef
         L = 2
@@ -160,80 +173,84 @@ class SPSA:
         gamma_nest_next = 0.1
         mu = 2
         eta = 0.95
-        alpha_nest = 0.5
-        alpha_x = 0.5
+        alpha_nest = 0.1
+        alpha_x = alpha_nest
 
         for step in range(1, num_steps + 1):  # шаги
             theta_new = {}
             gamma_nest = gamma_nest_next
             gamma_nest_next = (1 - alpha_nest) * gamma_nest + alpha_nest * (mu - eta)
+            # print(f"Check: {H - 2 * pow(alpha_nest, 2) / 2 * gamma_nest_next}")
+            # print(f"gamma_nest_next: {gamma_nest_next}")
             # diff = np.sqrt(H * 2 * gamma_nest) - alpha_x
-            diff = 0
-            if diff < 0:
-                diff = 0
-                print("diff < 0")
-            alpha_nest = alpha_x + diff
-
+            # diff = 0
+            # if diff < 0:
+            #     diff = 0
+            #     print("diff < 0")
+            # alpha_nest = alpha_x + diff
 
             for agent in agents.values():
-                theta_new[agent.ind] = {}  # Estimator of target position
-                err_history[agent.ind][step] = {}  # Error history for each step step for each target target
+                theta_new[agent.id] = {}  # Estimator of target position
+                err_history[agent.id][step] = {}  # Error history for each step step for each target target
 
-                for target in agent.targets.values():
+                for target_info in agent.targets_info.values():
 
                     if step == 0:
-                        self.ax.plot(theta_hat[agent.ind][target.tar_ind][0], theta_hat[agent.ind][target.tar_ind][1], 'o', markersize=3,
-                                     color=self.colors[agent.ind])
-                    spsa = self.spsa_step(agent.ind, step, target.tar_ind, theta_hat)
+                        self.ax.plot(target_info.theta_hat[0], target_info.theta_hat[1],
+                                     'o', markersize=3, color=self.colors[agent.id])
+                        print(target_info.theta_hat)
+                    spsa = self.spsa_step(step, agent.id, target_info.target.id, agents)
 
                     # nesterov acceleraion
                     # firstly go in the direction of previous theta_diff then find new one
                     # theta_diff_sum can be changed to sum so we will acc spsa step to
                     if step > 1 and accelerate:
-                        v_n = target.nest_mem
+                        v_n = target_info.nest_mem
                         x_n = 1 / (gamma_nest + alpha_nest * (mu - eta)) * (alpha_nest * gamma_nest * v_n
-                                                                            + gamma_nest_next * theta_hat[agent.ind][
-                                                                                target.tar_ind])
+                                                                            + gamma_nest_next * target_info.theta_hat)
                         coef = h
                     else:
                         v_n = 0
-                        x_n = theta_hat[agent.ind][target.tar_ind]
+                        x_n = target_info.theta_hat
                         coef = self.gamma
 
-                    theta_diff = self.local_vote_step(agent.ind, step, target.tar_ind, x_n, theta_hat)
+                    theta_diff = self.local_vote_step(step, agent.id, target_info.target.id, x_n, agents)
                     nesterov_step = coef * theta_diff
 
-                    theta_new[agent.ind][target.tar_ind] = x_n - (self.alpha * spsa + nesterov_step)
+                    target_info.theta_new = x_n - (self.alpha * spsa + nesterov_step)
 
                     if step > 1 and accelerate:
-                        v_n = 1 / gamma_nest * ((1 - alpha_nest) * gamma_nest * v_n + alpha_nest * (
-                                mu - eta) * x_n - alpha_nest * nesterov_step)
+                        v_n = 1 / gamma_nest * ((1 - alpha_nest) * gamma_nest * v_n
+                                                + alpha_nest * (mu - eta) * x_n - alpha_nest * nesterov_step)
 
-                    self.update_plot_step(agent.ind, target.tar_ind, theta_hat, theta_new)
+                    self.update_plot_step(agent.id, target_info.theta_hat, target_info.theta_new)
 
-                    err_l_i = self.compute_error(theta_new[agent.ind][target.tar_ind], self.r[target.tar_ind])
-                    # history_val = history_val.append({
-                    #     "agent": agent,
-                    #     "target": target,
-                    #     "step": step,
-                    #     "neibors": self.neibors[step][agent.ind],
-                    #     "old": theta_hat[agent.ind][target.tar_ind],
-                    #     "spsa": self.alpha * spsa,
-                    #     "theta_diff": theta_diff,
-                    #     "theta_diff_sum": self.gamma * theta_diff,
-                    #     "sum": self.alpha * spsa + self.gamma * theta_diff,
-                    #     "new": theta_new[agent.ind][target.tar_ind],
-                    #     "err": err_l_i,
-                    #     "nesterov_step": nesterov_step,
-                    #     "v_n": v_n,
-                    #     "alpah_nest": alpha_nest,
-                    #     "gamma_nest": gamma_nest
-                    # }, ignore_index=True)
+                    err_l_i = self.compute_error(target_info.theta_new, target_info.target.position)
+                    history_val = history_val.append({
+                        "sensor": agent.id,
+                        "target": target_info.target.id,
+                        "step": step,
+                        "neibors": self.neighbors[step][agent.id],
+                        "old": target_info.theta_hat,
+                        "spsa": self.alpha * spsa,
+                        "theta_diff": theta_diff,
+                        "theta_diff_sum": self.gamma * theta_diff,
+                        "sum": self.alpha * spsa + self.gamma * theta_diff,
+                        "new": target_info.theta_new,
+                        "err": err_l_i,
+                        "nesterov_step": nesterov_step,
+                        "v_n": v_n,
+                        "alpah_nest": alpha_nest,
+                        "gamma_nest": gamma_nest,
+                        "agent_pos": agent.position,
+                        "tar_pos": target_info.target.position,
+                        "tar_meas": target_info.meas
+                    }, ignore_index=True)
 
-                    target.error = err_l_i
-                    target.nest_mem = v_n
+                    target_info.error = err_l_i
+                    target_info.nest_mem = v_n
 
-                    err_history[agent.ind][step][target.tar_ind] = err_l_i
+                    err_history[agent.id][step][target_info.target.id] = err_l_i
 
                 self.fig.canvas.draw()
 
@@ -246,20 +263,18 @@ class SPSA:
             if errors[1][step] < eps or errors[1][step] > 1e+9:  # todo: for multiple targets
                 break
 
-            theta_hat = deepcopy(theta_new)
+            if tracking:
+                self.update_target_position(self.target_path[step], tracking, agents)
 
             if tracking:
-                self.update_target_position(self.target_path[step], tracking)
+                for target_info in targets.values():
+                    target_info.update_position(self.target_path[step])
+
+            for agent in agents.values():
+                agent.update_target(tracking)
 
         self.errors = errors
         self.err_history = err_history
-
-        # Compute error for each target and sensor separately
-        target_err = {
-            target: {
-                sensor: self.compute_error(theta_hat[sensor][target], self.r[target]) for sensor in self.N
-            } for target in self.M
-        }
 
         return Result(
             check=check,
@@ -267,53 +282,55 @@ class SPSA:
             accelerate=accelerate,
             method=method,
             errors=errors,
-            theta_hat=theta_hat,
             moment_alpha=self.moment_alpha,
-            target_err=target_err,
             history=history_val,
             err_history=err_history,
             agents=agents)
 
-    def update_plot_step(self, sensor, target, theta_hat, theta_new):
+    def update_plot_step(self, sensor, theta_hat, theta_new):
         if sensor == 3:
-            self.ax.plot([theta_hat[sensor][target][0], theta_new[sensor][target][0]],
-                         [theta_hat[sensor][target][1], theta_new[sensor][target][1]],
+            self.ax.plot([theta_hat[0], theta_new[0]],
+                         [theta_hat[1], theta_new[1]],
                          markersize=2, color=self.colors[sensor - 1])
-        self.ax.plot(theta_new[sensor][target][0], theta_new[sensor][target][1], 'o', markersize=3,
+        self.ax.plot(theta_new[0], theta_new[1], 'o', markersize=3,
                      color=self.colors[sensor - 1])
 
-    def local_vote_step(self, sensor, step, target, theta_sensor, theta_hat):
-        neibors_i = self.neibors[step].get(sensor, [])
-        b = self.weight[sensor - 1]
+    def local_vote_step(self, step, agent_id, target_id, agent_theta, agents_info):
+        # get estimation from neighbors
+        neighbors = self.neighbors[step].get(agent_id, [])
+        neighb_theta = {neighb_id: agents_info[neighb_id].targets_info[target_id].theta_hat for neighb_id in neighbors}
 
-        theta_diff = sum([abs(b[j - 1]) * (theta_sensor - theta_hat[j][target]) for j in neibors_i])
+        b = self.weight[agent_id - 1]
+
+        # step of local vote protocol
+        theta_diff = sum([abs(b[neib_id - 1]) * (agent_theta - theta) for neib_id, theta in neighb_theta.items()])
         return theta_diff
 
-    def spsa_step(self, sensor, step, target, theta_hat):
-        coef1 = 1 if self.random_coef[step][sensor][0] < 0.5 else -1
-        coef2 = 1 if self.random_coef[step][sensor][1] < 0.5 else -1
+    def spsa_step(self, step, agent_id, target_id, agents):
+        coef1 = 1 if self.random_coef[step][agent_id][0] < 0.5 else -1
+        coef2 = 1 if self.random_coef[step][agent_id][1] < 0.5 else -1
 
         delta = np.array([coef1 * self.Delta_abs_value, coef2 * self.Delta_abs_value])
 
-        # spsa step
-        x1 = theta_hat[sensor][target] + self.beta_1 * delta
-        x2 = theta_hat[sensor][target] - self.beta_2 * delta
+        theta_hat = agents[agent_id].targets_info[target_id].theta_hat
+        x1 = theta_hat + self.beta_1 * delta
+        x2 = theta_hat - self.beta_2 * delta
 
-        y1 = self.f_l_i(target, sensor, x1, self.neibors[step])
-        y2 = self.f_l_i(target, sensor, x2, self.neibors[step])
+        y1 = self.f_l_i(target_id, agent_id, x1, self.neighbors[step], agents)
+        y2 = self.f_l_i(target_id, agent_id, x2, self.neighbors[step], agents)
 
         spsa = (y1 - y2) / (2 * self.beta) * delta
         return spsa
 
-    def f_l_i(self, l, i, r_hat_l, neibors):
+    def f_l_i(self, target_id, agent_id, r_hat_l, neibors, agents_info):
         """ Calculate function f for target l and for sensor i
-        :param l: target index
-        :param i: i sensor index
+        :param target_id: target index
+        :param agent_id: sensor index
         :param r_hat_l: x point at which calculate
-        :return: matrixe D for i sensor and l target
+        :return: matrixe D for sensor agent_id and target target_id
         """
-        C = self.C_i(i, neibors)
-        D = self.D_l_i(l, i, neibors)
+        C = self.C_i(agent_id, neibors)
+        D = self.D_l_i(target_id, agent_id, neibors, agents_info)
 
         try:
             C_i_inv = np.linalg.inv(C)
@@ -331,23 +348,27 @@ class SPSA:
         C_i = [self.s.get(j) - self.s.get(i) for j in neibors.get(i)]
         return 2 * np.array(C_i)
 
-    def D_l_i(self, l, i, neibors):
-        """ Calculate matrix D for target l and for sensor i
-        :param l: target index
-        :param i: i sensor index
-        :return: matrixe D for i sensor and l target
+    def D_l_i(self, target_id, agent_id, neibors, agents_info):
+        """ Calculate matrix D for target taret_id and for sensor agent_id
+        :param target_id: target index
+        :param agent_id: sensor index
+        :param agents: agents info
+        :return: matrixe D for agent_id sensor and target_id target
         """
-        Dli = [self.calc_D_l_i_j(self.meas.get(l), i, j) for j in neibors.get(i)]
+        Dli = [self.calc_D_l_i_j(target_id, agent_id, neib_id, agents_info) for neib_id in neibors.get(agent_id)]
         return Dli
 
-    def calc_D_l_i_j(self, meas_l: dict, i, j):
+    def calc_D_l_i_j(self, target_id, agent_id, neib_id, agents_info: dict):
         """Calculate value of D_l_i_j
-        :param meas_l: distances between l target and each sensor
-        :param i: index of 1st sensor
-        :param j: index of 2nd sensor
+        :param target_id: target id
+        :param agent_id: index of 1st sensor
+        :param neib_id: index of 2nd sensor
+        :param agents_info: info about agents
         :return: D_l_i[j] for vector D_l_i
         """
-        return self.rho_overline(meas_l.get(i), meas_l.get(j)) + self.s_norms.get(j) - self.s_norms.get(i)
+        meas_agent = agents_info[agent_id].targets_info[target_id].meas
+        meas_neib = agents_info[neib_id].targets_info[target_id].meas
+        return self.rho_overline(meas_agent, meas_neib) + self.s_norms.get(neib_id) - self.s_norms.get(agent_id)
 
     def rho_overline(self, meas_1: float, meas_2: float):
         """Calculate difference between meas_1 and meas_2"""
@@ -362,37 +383,30 @@ class SPSA:
         shift = rad * np.array([np.sin(phi), np.cos(phi)])
         return coords + shift
 
-    def update_target_position(self, new_positions, tracking):
+    def update_target_position(self, new_positions, tracking, agents):
         if tracking:
             self.ax.plot([self.r[1][0], new_positions[1][0]],
                          [self.r[1][1], new_positions[1][1]], 'bx', markersize=8)
         self.r = new_positions
-        self.meas = {
-            target:
-                {
-                    sensor: rho(self.r.get(target), self.s.get(sensor)) for sensor in self.N
-                    # measurments  from target to sensor
-                } for target in self.M
-        }
 
     def compute_error(self, vector_1, vector_2):
-        return pow(sum(vector_1 - vector_2), 2)
+        return sum(np.power(vector_1 - vector_2, 2))
 
     def get_random_neibors(self, weight, max=2):
         neibors_mat = (weight != 0).astype(int)
         np.fill_diagonal(neibors_mat, 0)
 
         # choose num random neibors from all neibors
-        neibors = {}
+        neighbors = {}
         for sensor in self.N:
             neib = [ind + 1 for ind, sens in enumerate(neibors_mat[sensor - 1]) if sens == 1]
 
             if len(neib) > max:
                 neib = sample(neib, max)
 
-            neibors[sensor] = neib
+            neighbors[sensor] = neib
 
-        return neibors
+        return neighbors
 
     #  Optimization functions
     def cheb_polyn_mat(self, n, x, c2):
