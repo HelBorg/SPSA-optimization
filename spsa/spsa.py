@@ -1,11 +1,11 @@
-import matplotlib.pyplot as plt
 import time
-import numpy as np
+from copy import deepcopy
 from random import random
 from random import sample
-from copy import deepcopy
+
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
-import json
 
 __version__ = "0.1.4"
 print(f"Version: {__version__}")
@@ -46,7 +46,7 @@ class Agent:
         return self.targets_info.get(target_id)
 
     def update_target(self, tracking):
-        res = [tar.update(self.position, tracking) for tar in self.targets_info.values()]
+        [tar.update(self.position, tracking) for tar in self.targets_info.values()]
 
 
 class Target:
@@ -107,7 +107,6 @@ class SPSA:
         self.s_norms = {i: sum(val * val) for i, val in self.s.items()}
         self.Delta_abs_value = 1 / np.sqrt(self.d)
         self.beta = self.beta_1 + self.beta_2
-        self.meas = {targ: {sens: rho(self.r.get(targ), self.s.get(sens)) for sens in self.N} for targ in self.M}
 
     def init_plot(self):
         self.fig = plt.figure()
@@ -135,23 +134,19 @@ class SPSA:
             } for k in range(1, num_steps + 1)
         }  # todo: for multiple targets
 
-        self.target_path = {1: deepcopy(self.r)}
+        self.target_path = {target_id: deepcopy(self.r.get(target_id)) for target_id in self.M}
 
         if not tracking:
             return
 
         coef = self.track_coef
         for k in range(2, num_steps + 1):
-            self.target_path[k] = {l:
-                                       self.target_path[k - 1][l] + [2 * coef * random() - coef,
-                                                                     2 * coef * random() - coef]
-                                   for l in self.M
-                                   }
+            self.target_path[k] = {
+                l: self.target_path[k - 1][l] + [2 * coef * random() - coef, 2 * coef * random() - coef]
+                for l in self.M
+            }
 
     def run(self, method, num_steps=20, eps=0.01, friends_num=2, accelerate=False, tracking=False, check=False):
-        self.method = method
-        print(self.moment_alpha)
-
         if not hasattr(self, "neighbors"):
             print("Init random variables")
             self.init_random_vars(num_steps, friends_num, tracking)
@@ -160,9 +155,8 @@ class SPSA:
 
         targets = {target_id: Target(target_id, self.target_path[1][target_id]) for target_id in self.M}
         agents = {sensor_id: Agent(sensor_id, self.s[sensor_id], targets) for sensor_id in self.N}
-        self.update_target_position(self.target_path[1], tracking, agents)
+        self.update_target_position(self.target_path[1], targets)
 
-        history_val = pd.DataFrame()
         err_history = {sensor: {} for sensor in self.N}
         errors = {target: {} for target in self.M}
 
@@ -177,20 +171,11 @@ class SPSA:
         alpha_x = alpha_nest
 
         for step in range(1, num_steps + 1):  # шаги
-            theta_new = {}
             gamma_nest = gamma_nest_next
             gamma_nest_next = (1 - alpha_nest) * gamma_nest + alpha_nest * (mu - eta)
-            # print(f"Check: {H - 2 * pow(alpha_nest, 2) / 2 * gamma_nest_next}")
-            # print(f"gamma_nest_next: {gamma_nest_next}")
-            # diff = np.sqrt(H * 2 * gamma_nest) - alpha_x
-            # diff = 0
-            # if diff < 0:
-            #     diff = 0
-            #     print("diff < 0")
-            # alpha_nest = alpha_x + diff
+            # print(f"Check: {H - 2 * pow(alpha_nest, 2) / 2 * gamma_nest_next} > 0?")
 
             for agent in agents.values():
-                theta_new[agent.id] = {}  # Estimator of target position
                 err_history[agent.id][step] = {}  # Error history for each step step for each target target
 
                 for target_info in agent.targets_info.values():
@@ -199,6 +184,7 @@ class SPSA:
                         self.ax.plot(target_info.theta_hat[0], target_info.theta_hat[1],
                                      'o', markersize=3, color=self.colors[agent.id])
                         print(target_info.theta_hat)
+
                     spsa = self.spsa_step(step, agent.id, target_info.target.id, agents)
 
                     # nesterov acceleraion
@@ -226,26 +212,6 @@ class SPSA:
                     self.update_plot_step(agent.id, target_info.theta_hat, target_info.theta_new)
 
                     err_l_i = self.compute_error(target_info.theta_new, target_info.target.position)
-                    history_val = history_val.append({
-                        "sensor": agent.id,
-                        "target": target_info.target.id,
-                        "step": step,
-                        "neibors": self.neighbors[step][agent.id],
-                        "old": target_info.theta_hat,
-                        "spsa": self.alpha * spsa,
-                        "theta_diff": theta_diff,
-                        "theta_diff_sum": self.gamma * theta_diff,
-                        "sum": self.alpha * spsa + self.gamma * theta_diff,
-                        "new": target_info.theta_new,
-                        "err": err_l_i,
-                        "nesterov_step": nesterov_step,
-                        "v_n": v_n,
-                        "alpah_nest": alpha_nest,
-                        "gamma_nest": gamma_nest,
-                        "agent_pos": agent.position,
-                        "tar_pos": target_info.target.position,
-                        "tar_meas": target_info.meas
-                    }, ignore_index=True)
 
                     target_info.error = err_l_i
                     target_info.nest_mem = v_n
@@ -264,9 +230,8 @@ class SPSA:
                 break
 
             if tracking:
-                self.update_target_position(self.target_path[step], tracking, agents)
+                self.update_target_position(self.target_path[step], agents)
 
-            if tracking:
                 for target_info in targets.values():
                     target_info.update_position(self.target_path[step])
 
@@ -282,8 +247,6 @@ class SPSA:
             accelerate=accelerate,
             method=method,
             errors=errors,
-            moment_alpha=self.moment_alpha,
-            history=history_val,
             err_history=err_history,
             agents=agents)
 
@@ -383,11 +346,9 @@ class SPSA:
         shift = rad * np.array([np.sin(phi), np.cos(phi)])
         return coords + shift
 
-    def update_target_position(self, new_positions, tracking, agents):
-        if tracking:
-            self.ax.plot([self.r[1][0], new_positions[1][0]],
-                         [self.r[1][1], new_positions[1][1]], 'bx', markersize=8)
-        self.r = new_positions
+    def update_target_position(self, new_positions, targets):
+        self.ax.plot([targets[1].position[0], new_positions[1][0]],
+                     [targets[1].position[1], new_positions[1][1]], 'bx', markersize=8)
 
     def compute_error(self, vector_1, vector_2):
         return sum(np.power(vector_1 - vector_2, 2))
@@ -407,34 +368,6 @@ class SPSA:
             neighbors[sensor] = neib
 
         return neighbors
-
-    #  Optimization functions
-    def cheb_polyn_mat(self, n, x, c2):
-        cheb = [0] * 3
-        cheb[0] = np.identity(len(x))
-        cheb[1] = c2 * x
-
-        for i in range(2, self.n + 1):
-            next_cheb = 2 * c2 * np.matmul(x, cheb[1]) - cheb[0]
-            cheb[0] = cheb[1]
-            cheb[1] = next_cheb
-        return cheb[min([n, 1])]
-
-    def cheb_acceleration(self, mat):
-        eigens = sorted(np.linalg.eig(mat)[0])
-        cond = abs(eigens[-1]) / abs(eigens[1])
-
-        c2 = (cond + 1) / (cond - 1)
-        c3 = 2 / (eigens[-1] + eigens[1])
-
-        eye_mat = np.identity(len(mat))
-        k = int(np.floor(np.sqrt(cond)))
-
-        mat_k = self.cheb_polyn_mat(k, eye_mat - c3 * mat, c2)
-        a_k = self.cheb_polyn_mat(k, np.array([1]), c2)
-        cheb_pol = eye_mat - mat_k / a_k
-
-        return cheb_pol
 
 
 if __name__ == "__main__":
