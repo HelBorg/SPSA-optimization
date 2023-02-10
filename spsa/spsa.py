@@ -168,7 +168,7 @@ class SPSA:
         mu = 2
         eta = 0.95
         alpha_nest = 0.1
-        alpha_x = alpha_nest
+        alpha_x = 0.1
 
         for step in range(1, num_steps + 1):  # шаги
             gamma_nest = gamma_nest_next
@@ -221,10 +221,10 @@ class SPSA:
                 self.fig.canvas.draw()
 
             print(
-                f"Error - {sum([err_history[sensor][step][1] for sensor in self.N]) / self.n:.2f} on {step} step for {1} target")
+                f"Error - {sum([pow(err_history[sensor][step][1], 2) for sensor in self.N]) / self.n:.2f} on {step} step for {1} target")
             time.sleep(1)
 
-            errors[1][step] = sum([err_history[sensor][step][1] for sensor in self.N]) / self.n
+            errors[1][step] = sum([pow(err_history[sensor][step][1], 2) for sensor in self.N]) / self.n
 
             if errors[1][step] < eps or errors[1][step] > 1e+9:  # todo: for multiple targets
                 break
