@@ -134,7 +134,7 @@ class SPSA:
             } for k in range(1, num_steps + 1)
         }  # todo: for multiple targets
 
-        self.target_path = {target_id: deepcopy(self.r.get(target_id)) for target_id in self.M}
+        self.target_path = {1: {target_id: deepcopy(self.r.get(target_id)) for target_id in self.M}}
 
         if not tracking:
             return
@@ -161,19 +161,24 @@ class SPSA:
         errors = {target: {} for target in self.M}
 
         # nesterov coef
-        L = 2
-        h = 0.08
+        L = self.L
+        h = self.h
         H = h - pow(h, 2) * L / 2
-        gamma_nest_next = 0.1
-        mu = 2
-        eta = 0.95
-        alpha_nest = 0.1
+        gamma_nest_next = self.alpha_nest_next
+        mu = self.mu
+        eta = self.eta
+        alpha_nest = self.alpha_nest
         alpha_x = 0.1
 
         for step in range(1, num_steps + 1):  # шаги
             gamma_nest = gamma_nest_next
             gamma_nest_next = (1 - alpha_nest) * gamma_nest + alpha_nest * (mu - eta)
-            # print(f"Check: {H - 2 * pow(alpha_nest, 2) / 2 * gamma_nest_next} > 0?")
+            if accelerate and H - pow(alpha_nest, 2) / 2 * gamma_nest_next < 0:
+                print(f"h = {h}")
+                print(f"H = {H}")
+                print(f"Check: {H - pow(alpha_nest, 2) / 2 * gamma_nest_next} > 0?")
+                return None
+
 
             for agent in agents.values():
                 err_history[agent.id][step] = {}  # Error history for each step step for each target target
