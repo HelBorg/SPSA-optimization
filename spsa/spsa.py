@@ -152,6 +152,7 @@ class SPSA:
             self.init_random_vars(num_steps, friends_num, tracking)
 
         self.init_plot()
+        history_val = pd.DataFrame()
 
         targets = {target_id: Target(target_id, self.target_path[1][target_id]) for target_id in self.M}
         agents = {sensor_id: Agent(sensor_id, self.s[sensor_id], targets) for sensor_id in self.N}
@@ -164,7 +165,7 @@ class SPSA:
         L = self.L
         h = self.h
         H = h - pow(h, 2) * L / 2
-        gamma_nest_next = self.alpha_nest_next
+        gamma_nest_next = self.gamma_nest
         mu = self.mu
         eta = self.eta
         alpha_nest = self.alpha_nest
@@ -203,7 +204,7 @@ class SPSA:
                     else:
                         v_n = 0
                         x_n = target_info.theta_hat
-                        coef = self.gamma
+                        coef = h
 
                     theta_diff = self.local_vote_step(step, agent.id, target_info.target.id, x_n, agents)
                     nesterov_step = coef * theta_diff
@@ -223,11 +224,32 @@ class SPSA:
 
                     err_history[agent.id][step][target_info.target.id] = err_l_i
 
+                    history_val = history_val.append({
+                        "sensor": agent.id,
+                        "target": target_info.target.id,
+                        "step": step,
+                        "neibors": self.neighbors[step][agent.id],
+                        "old": target_info.theta_hat,
+                        "spsa": self.alpha * spsa,
+                        "theta_diff": theta_diff,
+                        "theta_diff_sum": self.gamma * theta_diff,
+                        "sum": self.alpha * spsa + self.gamma * theta_diff,
+                        "new": target_info.theta_new,
+                        "err": err_l_i,
+                        "nesterov_step": nesterov_step,
+                        "v_n": v_n,
+                        "alpah_nest": alpha_nest,
+                        "gamma_nest": gamma_nest,
+                        "agent_pos": agent.position,
+                        "tar_pos": target_info.target.position,
+                        "tar_meas": target_info.meas
+                    }, ignore_index=True)
+
                 self.fig.canvas.draw()
 
             print(
                 f"Error - {sum([pow(err_history[sensor][step][1], 2) for sensor in self.N]) / self.n:.2f} on {step} step for {1} target")
-            time.sleep(1)
+            # time.sleep(1)
 
             errors[1][step] = sum([pow(err_history[sensor][step][1], 2) for sensor in self.N]) / self.n
 
@@ -253,6 +275,7 @@ class SPSA:
             method=method,
             errors=errors,
             err_history=err_history,
+            history=history_val,
             agents=agents)
 
     def update_plot_step(self, sensor, theta_hat, theta_new):
@@ -356,7 +379,7 @@ class SPSA:
                      [targets[1].position[1], new_positions[1][1]], 'bx', markersize=8)
 
     def compute_error(self, vector_1, vector_2):
-        return sum(np.power(vector_1 - vector_2, 2))
+        return np.sqrt(sum(np.power(vector_1 - vector_2, 2)))
 
     def get_random_neibors(self, weight, max=2):
         neibors_mat = (weight != 0).astype(int)
